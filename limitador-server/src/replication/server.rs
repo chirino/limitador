@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time;
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Code, Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 use limitador::service::replication::v1::Packet;
@@ -89,9 +89,20 @@ fn is_disconnect(err: &Status) -> bool {
 struct Session {
     state: Arc<RwLock<ReplicationSharedState>>,
     out_stream: MessageSender,
+    peer_id: Vec<u8>,
 }
 
 impl Session {
+    async fn close(&mut self) {
+        let mut state = self.state.write().await;
+        match state.peer_trackers.get_mut(self.peer_id.as_slice()) {
+            Some(peer) => {
+                peer.session = None;
+            }
+            None => {}
+        }
+    }
+
     async fn process(&mut self, in_stream: &mut Streaming<Packet>) -> Result<(), Status> {
         // Send a MembershipUpdate to inform the peer about all the members
         {
@@ -108,9 +119,9 @@ impl Session {
         while let Some(result) = in_stream.next().await {
             match result {
                 Ok(packet) => {
-                    println!("got packet {:?}", packet);
                     match packet.message {
                         Some(packet::Message::Ping(_)) => {
+                            println!("got Ping");
                             self.out_stream
                                 .clone()
                                 .send(Ok(Message::Pong(Pong {
@@ -123,6 +134,7 @@ impl Session {
                                 .await?;
                         }
                         Some(packet::Message::MembershipUpdate(update)) => {
+                            println!("got MembershipUpdate {:?}", update);
                             // add any new peers to peer_trackers
                             let mut state = self.state.write().await;
                             for peer in update.peers {
@@ -137,6 +149,14 @@ impl Session {
                                     );
                                 }
                             }
+                        }
+                        Some(packet::Message::SubscribeRequest(request)) => {
+                            println!("got SubscribeRequest {:?}", request);
+                            // TODO: adjust which counter values are sent to the peer.
+                        }
+                        Some(packet::Message::CounterUpdate(update)) => {
+                            println!("got CounterUpdate {:?}", update);
+                            // TODO: update the counters
                         }
                         _ => {
                             return Err(Status::invalid_argument(format!(
@@ -167,11 +187,11 @@ impl Session {
 
 // process_new_stream is called when a new stream is created, it will handle the initial handshake
 // and updating the session state in the state.peer_trackers map.
-async fn process_new_stream(
+async fn handshake(
     state: Arc<RwLock<ReplicationSharedState>>,
     in_stream: &mut Streaming<Packet>,
     out_stream: &mut MessageSender,
-) -> Result<(), Status> {
+) -> Result<Session, Status> {
     // Let the peer know who we are...
     let start = SystemTime::now(); // .duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
     {
@@ -200,9 +220,10 @@ async fn process_new_stream(
     let peer_pong = read_pong(in_stream).await?;
     let end = SystemTime::now();
 
-    let mut session = Session {
+    let session = Session {
         state: state.clone(),
         out_stream: out_stream.clone(),
+        peer_id: peer_hello.peer_id.clone(),
     };
 
     // We now know who the peer is and our latency to him.
@@ -236,20 +257,7 @@ async fn process_new_stream(
             }
         }
     }
-
-    let result = session.process(in_stream).await;
-
-    // cleanup, set the session to None
-    {
-        let mut state = state.write().await;
-        match state.peer_trackers.get_mut(peer_hello.peer_id.as_slice()) {
-            Some(peer) => {
-                peer.session = None;
-            }
-            None => {}
-        }
-    }
-    return result;
+    return Ok(session);
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -305,6 +313,7 @@ pub enum MessageSender {
     Server(Sender<Result<Packet, Status>>),
     Client(Sender<Packet>),
 }
+
 impl MessageSender {
     async fn send(self, message: Result<Message, Status>) -> Result<(), Status> {
         match self {
@@ -349,12 +358,20 @@ impl limitador::service::replication::v1::replication_server::Replication for Se
         let state = self.state.clone();
         tokio::spawn(async move {
             let mut sender = MessageSender::Server(tx);
-            match process_new_stream(state, &mut in_stream, &mut sender).await {
-                Ok(_) => {
-                    println!("stream ended");
+            match handshake(state.clone(), &mut in_stream, &mut sender).await {
+                Ok(mut session) => {
+                    match session.process(&mut in_stream).await {
+                        Ok(_) => {
+                            println!("server accepted stream ended");
+                        }
+                        Err(err) => {
+                            println!("server accepted stream processing failed {:?}", err);
+                        }
+                    }
+                    session.close().await;
                 }
                 Err(err) => {
-                    println!("stream ended with error {:?}", err);
+                    println!("stream handshake failed {:?}", err);
                 }
             }
         });
@@ -366,47 +383,68 @@ impl limitador::service::replication::v1::replication_server::Replication for Se
 }
 
 // Connect to a peer and start a replication session
-fn connect_to_peer(state: Arc<RwLock<ReplicationSharedState>>, peer_url: String) {
-    // let state = state.clone();
+async fn connect_to_peer(
+    state: Arc<RwLock<ReplicationSharedState>>,
+    peer_url: String,
+) -> Result<(), Status> {
+    println!("connecting to peer '{}'", peer_url.clone());
+    let mut client = match ReplicationClient::connect(peer_url.clone()).await {
+        Ok(client) => client,
+        Err(err) => {
+            return Err(Status::new(Code::Unknown, err.to_string()));
+        }
+    };
+
+    let (tx, rx) = mpsc::channel(1);
+
+    let mut in_stream = client.stream(ReceiverStream::new(rx)).await?.into_inner();
+    let mut sender = MessageSender::Client(tx);
+    let mut session = handshake(state.clone(), &mut in_stream, &mut sender).await?;
+
     tokio::spawn(async move {
-        // We should keep trying till we have created a peer tracker for the peer_url
-        loop {
-            time::sleep(Duration::from_secs(1)).await;
-            println!("connecting to peer '{}'", peer_url.clone());
-            let mut client = match ReplicationClient::connect(peer_url.clone()).await {
-                Ok(client) => client,
-                Err(err) => {
-                    println!("failed to connect with peer '{}': {:?}", peer_url, err);
-                    continue;
-                }
-            };
+        match session.process(&mut in_stream).await {
+            Ok(_) => {
+                println!("client initiated stream ended");
+            }
+            Err(err) => {
+                println!("client initiated stream processing failed {:?}", err);
+            }
+        }
+        session.close().await;
+    });
+    Ok(())
+}
 
-            let (tx, rx) = mpsc::channel(1);
+// Reconnect failed peers periodically
+async fn reconnect_to_failed_peers(state: Arc<RwLock<ReplicationSharedState>>) -> () {
+    loop {
+        time::sleep(Duration::from_secs(1)).await;
+        let failed_peers: Vec<_> = {
+            let state = state.read().await;
+            state
+                .peer_trackers
+                .iter()
+                .filter_map(|(_, peer_tracker)| {
+                    if peer_tracker.session.is_none() {
+                        Some(peer_tracker.peer.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
-            let mut in_stream = match client.stream(ReceiverStream::new(rx)).await {
-                Ok(response) => response.into_inner(),
-                Err(err) => {
-                    println!(
-                        "failed start replication sessions with peer '{}': {:?}",
-                        peer_url, err
-                    );
-                    continue;
-                }
-            };
-
-            let mut sender = MessageSender::Client(tx);
-            match process_new_stream(state.clone(), &mut in_stream, &mut sender).await {
-                Ok(_) => {
-                    println!("stream ended");
-                    return;
-                }
-                Err(err) => {
-                    println!("failed to connect with peer '{}': {:?}", peer_url, err);
-                    continue;
+        for peer in failed_peers {
+            for url in peer.urls {
+                match connect_to_peer(state.clone(), url.clone()).await {
+                    Ok(_) => break,
+                    Err(err) => {
+                        println!("failed to connect with peer '{}': {:?}", url, err);
+                    }
                 }
             }
         }
-    });
+    }
 }
 
 #[tokio::main]
@@ -456,7 +494,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create outbound connections to the configured peers
     if let Some(peer_urls) = peer_urls {
         peer_urls.into_iter().for_each(|peer_url| {
-            connect_to_peer(state.clone(), peer_url.clone());
+            let state = state.clone();
+            let peer_url = peer_url.clone();
+            tokio::spawn(async move {
+                // Keep trying until we get once successful connection handshake.
+                loop {
+                    match connect_to_peer(state.clone(), peer_url.clone()).await {
+                        Ok(_) => break,
+                        Err(err) => {
+                            println!("failed to connect with peer '{}': {:?}", peer_url, err);
+                            time::sleep(Duration::from_secs(1)).await
+                        }
+                    }
+                }
+            });
+        })
+    }
+
+    // Periodically reconnect to failed peers
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            reconnect_to_failed_peers(state.clone()).await;
         });
     }
 
