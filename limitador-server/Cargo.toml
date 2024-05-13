@@ -59,4 +59,4 @@ tonic-build = "0.11"
 
 [[bin]]
 name = "replication-server"
-path = "src/replication/server.rs"
+path = "src/replication/main.rs"

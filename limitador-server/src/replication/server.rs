@@ -1,37 +1,22 @@
+use std::{error::Error, io::ErrorKind, pin::Pin};
 use std::collections::HashMap;
 use std::ops::Add;
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{error::Error, io::ErrorKind, net::ToSocketAddrs, pin::Pin};
+use std::time::Duration;
 
-use clap::{Arg, ArgAction, Command};
-use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time;
-use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
+use tokio::sync::mpsc::Sender;
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Code, Request, Response, Status, Streaming};
-use uuid::Uuid;
 
-use limitador::service::replication::v1::Packet;
-
+use crate::clock_skew::ClockSkew;
+use crate::limitador::service::replication::v1::{Hello, packet, Packet, Peer, Pong};
 use crate::limitador::service::replication::v1::packet::Message;
 use crate::limitador::service::replication::v1::replication_client::ReplicationClient;
-use crate::limitador::service::replication::v1::replication_server::ReplicationServer;
-use crate::limitador::service::replication::v1::{packet, Hello, MembershipUpdate, Peer, Pong};
-
-pub mod limitador {
-    pub mod service {
-        pub mod replication {
-            // clippy will barf on protobuff generated code for enum variants in
-            // v3::socket_option::SocketState, so allow this lint
-            #[allow(clippy::enum_variant_names, clippy::derive_partial_eq_without_eq)]
-            pub mod v1 {
-                tonic::include_proto!("limitador.service.replication.v1");
-            }
-        }
-    }
-}
+use crate::limitador::service::replication::v1::replication_server::Replication;
+use crate::session::Session;
+use crate::shared::{PeerId, PeerTracker, ReplicationSharedState};
 
 fn match_for_io_error(err_status: &Status) -> Option<&std::io::Error> {
     let mut err: &(dyn Error + 'static) = err_status;
@@ -76,235 +61,13 @@ async fn read_pong(in_stream: &mut Streaming<Packet>) -> Result<Pong, Status> {
     }
 }
 
-fn is_disconnect(err: &Status) -> bool {
+pub fn is_disconnect(err: &Status) -> bool {
     if let Some(io_err) = match_for_io_error(err) {
         if io_err.kind() == ErrorKind::BrokenPipe {
             return true;
         }
     }
     return false;
-}
-
-#[derive(Clone)]
-struct Session {
-    state: Arc<RwLock<ReplicationSharedState>>,
-    out_stream: MessageSender,
-    peer_id: Vec<u8>,
-}
-
-impl Session {
-    async fn close(&mut self) {
-        let mut state = self.state.write().await;
-        match state.peer_trackers.get_mut(self.peer_id.as_slice()) {
-            Some(peer) => {
-                peer.session = None;
-            }
-            None => {}
-        }
-    }
-
-    async fn process(&mut self, in_stream: &mut Streaming<Packet>) -> Result<(), Status> {
-        // Send a MembershipUpdate to inform the peer about all the members
-        {
-            let state = self.state.read().await;
-            let peers = state.peers();
-            self.out_stream
-                .clone()
-                .send(Ok(Message::MembershipUpdate(MembershipUpdate {
-                    peers: peers.clone(),
-                })))
-                .await?;
-        };
-
-        while let Some(result) = in_stream.next().await {
-            match result {
-                Ok(packet) => {
-                    match packet.message {
-                        Some(packet::Message::Ping(_)) => {
-                            println!("got Ping");
-                            self.out_stream
-                                .clone()
-                                .send(Ok(Message::Pong(Pong {
-                                    current_time: SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_millis()
-                                        as u64,
-                                })))
-                                .await?;
-                        }
-                        Some(packet::Message::MembershipUpdate(update)) => {
-                            println!("got MembershipUpdate {:?}", update);
-                            // add any new peers to peer_trackers
-                            let mut state = self.state.write().await;
-                            for peer in update.peers {
-                                if !state.peer_trackers.contains_key(&peer.peer_id) {
-                                    state.peer_trackers.insert(
-                                        peer.peer_id.clone(),
-                                        PeerTracker {
-                                            peer,
-                                            clock_skew: ClockSkew::None(),
-                                            session: None,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        Some(packet::Message::SubscribeRequest(request)) => {
-                            println!("got SubscribeRequest {:?}", request);
-                            // TODO: adjust which counter values are sent to the peer.
-                        }
-                        Some(packet::Message::CounterUpdate(update)) => {
-                            println!("got CounterUpdate {:?}", update);
-                            // TODO: update the counters
-                        }
-                        _ => {
-                            return Err(Status::invalid_argument(format!(
-                                "unsupported packet {:?}",
-                                packet
-                            )));
-                        }
-                    }
-                }
-                Err(err) => {
-                    println!("got err {:?}", err);
-                    if is_disconnect(&err) {
-                        eprintln!("\tclient disconnected: broken pipe");
-                        break;
-                    } else {
-                        println!("sending err {:?}", err);
-                        match self.out_stream.clone().send(Err(err)).await {
-                            Ok(_) => (),
-                            Err(_err) => break, // response was dropped
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-// process_new_stream is called when a new stream is created, it will handle the initial handshake
-// and updating the session state in the state.peer_trackers map.
-async fn handshake(
-    state: Arc<RwLock<ReplicationSharedState>>,
-    in_stream: &mut Streaming<Packet>,
-    out_stream: &mut MessageSender,
-) -> Result<Session, Status> {
-    // Let the peer know who we are...
-    let start = SystemTime::now(); // .duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
-    {
-        let state = state.read().await;
-        out_stream
-            .clone()
-            .send(Ok(Message::Hello(Hello {
-                peer_id: state.peer_id.clone(),
-                urls: state.urls.clone(),
-            })))
-            .await?;
-    }
-
-    // Wait for the peer to tell us who he is...
-    let peer_hello = read_hello(in_stream).await?;
-
-    // respond with a Pong so the peer can calculate the round trip latency
-    out_stream
-        .clone()
-        .send(Ok(Message::Pong(Pong {
-            current_time: start.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-        })))
-        .await?;
-
-    // Get the pong back from the peer...
-    let peer_pong = read_pong(in_stream).await?;
-    let end = SystemTime::now();
-
-    let session = Session {
-        state: state.clone(),
-        out_stream: out_stream.clone(),
-        peer_id: peer_hello.peer_id.clone(),
-    };
-
-    // We now know who the peer is and our latency to him.
-    {
-        let mut state = state.write().await;
-        match state.peer_trackers.get_mut(peer_hello.peer_id.as_slice()) {
-            Some(tracker) => {
-                if tracker.session.is_some() {
-                    return Err(Status::already_exists("peer already connected"));
-                } else {
-                    tracker.session = Some(session.clone());
-                }
-            }
-            None => {
-                let latency = end.duration_since(start).unwrap();
-                let peer_time = UNIX_EPOCH.add(Duration::from_millis(peer_pong.current_time));
-                let peer_time_adj = peer_time.add(latency.div_f32(2.0)); // adjust for round trip latency
-
-                state.peer_trackers.insert(
-                    peer_hello.peer_id.clone(),
-                    PeerTracker {
-                        clock_skew: ClockSkew::new(end, peer_time_adj),
-                        peer: Peer {
-                            peer_id: peer_hello.peer_id.clone(),
-                            urls: peer_hello.urls,
-                            latency: latency.as_millis() as u32,
-                        },
-                        session: Some(session.clone()),
-                    },
-                );
-            }
-        }
-    }
-    return Ok(session);
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum ClockSkew {
-    None(),
-    Slow(Duration),
-    Fast(Duration),
-}
-
-impl ClockSkew {
-    fn new(local: SystemTime, remote: SystemTime) -> ClockSkew {
-        if local == remote {
-            return ClockSkew::None();
-        } else if local.gt(&remote) {
-            ClockSkew::Slow(local.duration_since(remote).unwrap())
-        } else {
-            ClockSkew::Fast(remote.duration_since(local).unwrap())
-        }
-    }
-}
-
-pub struct PeerTracker {
-    // The peer we are tracking
-    peer: Peer,
-    // Keep track of the clock skew between us and the peer
-    #[allow(dead_code)]
-    clock_skew: ClockSkew,
-    // The communication session we have with the peer, may be None if not connected
-    session: Option<Session>,
-}
-
-// ReplicationSharedState holds all the mutable shared state of the server.
-pub struct ReplicationSharedState {
-    peer_id: Vec<u8>,
-    urls: Vec<String>,
-    peer_trackers: HashMap<Vec<u8>, PeerTracker>,
-}
-
-impl ReplicationSharedState {
-    pub fn peers(&self) -> Vec<Peer> {
-        let mut peers = Vec::new();
-        self.peer_trackers.iter().for_each(|(_, peer_tracker)| {
-            peers.push(peer_tracker.peer.clone());
-        });
-        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
-        peers
-    }
 }
 
 // MessageSender is used to abstract the difference between the server and client sender streams...
@@ -315,7 +78,7 @@ pub enum MessageSender {
 }
 
 impl MessageSender {
-    async fn send(self, message: Result<Message, Status>) -> Result<(), Status> {
+    pub async fn send(self, message: Result<Message, Status>) -> Result<(), Status> {
         match self {
             MessageSender::Server(sender) => {
                 let value = message.map(|x| Packet { message: Some(x) });
@@ -337,13 +100,164 @@ impl MessageSender {
     }
 }
 
+#[derive(Clone)]
 pub struct Server {
     state: Arc<RwLock<ReplicationSharedState>>,
 }
 
+impl Server {
+    // Create a new server with the given peer_id
+    pub(crate) fn new(peer_id: PeerId) -> Server {
+        Server {
+            state: Arc::new(RwLock::new(ReplicationSharedState {
+                peer_id,
+                urls: vec![],
+                peer_trackers: HashMap::new(),
+            })),
+        }
+    }
+
+    // Connect to a peer and start a replication session.  This returns once the session handshake
+    // completes.
+    pub async fn connect_to_peer(&self,
+                                 peer_url: String,
+    ) -> Result<(), Status> {
+        println!("connecting to peer '{}'", peer_url.clone());
+        let mut client = match ReplicationClient::connect(peer_url.clone()).await {
+            Ok(client) => client,
+            Err(err) => {
+                return Err(Status::new(Code::Unknown, err.to_string()));
+            }
+        };
+
+        let (tx, rx) = mpsc::channel(1);
+
+        let mut in_stream = client.stream(ReceiverStream::new(rx)).await?.into_inner();
+        let mut sender = MessageSender::Client(tx);
+        let mut session = self.handshake(&mut in_stream, &mut sender).await?;
+
+        // Session is now established, process the session async...
+        tokio::spawn(async move {
+            match session.process(&mut in_stream).await {
+                Ok(_) => {
+                    println!("client initiated stream ended");
+                }
+                Err(err) => {
+                    println!("client initiated stream processing failed {:?}", err);
+                }
+            }
+            session.close().await;
+        });
+
+        Ok(())
+    }
+
+    // Reconnect failed peers periodically
+    pub async fn reconnect_to_failed_peers(&self) -> () {
+        let failed_peers: Vec<_> = {
+            let state = self.state.read().await;
+            state
+                .peer_trackers
+                .iter()
+                .filter_map(|(_, peer_tracker)| {
+                    if peer_tracker.session.is_none() {
+                        Some(peer_tracker.peer.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for peer in failed_peers {
+            for url in peer.urls {
+                match self.connect_to_peer(url.clone()).await {
+                    Ok(_) => break,
+                    Err(err) => {
+                        println!("failed to connect with peer '{}': {:?}", url, err);
+                    }
+                }
+            }
+        }
+    }
+
+    // handshake is called when a new stream is created, it will handle the initial handshake
+    // and updating the session state in the state.peer_trackers map.
+    async fn handshake(&self,
+                       in_stream: &mut Streaming<Packet>,
+                       out_stream: &mut MessageSender,
+    ) -> Result<Session, Status> {
+        // Let the peer know who we are...
+        let start = SystemTime::now(); // .duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+        {
+            let state = self.state.read().await;
+            out_stream
+                .clone()
+                .send(Ok(Message::Hello(Hello {
+                    peer_id: state.peer_id.vec(),
+                    urls: state.urls.clone(),
+                })))
+                .await?;
+        }
+
+        // Wait for the peer to tell us who he is...
+        let peer_hello = read_hello(in_stream).await?;
+
+        // respond with a Pong so the peer can calculate the round trip latency
+        out_stream
+            .clone()
+            .send(Ok(Message::Pong(Pong {
+                current_time: start.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+            })))
+            .await?;
+
+        // Get the pong back from the peer...
+        let peer_pong = read_pong(in_stream).await?;
+        let end = SystemTime::now();
+
+        let peer_id = PeerId(peer_hello.peer_id.clone());
+        let session = Session {
+            peer_id: peer_id.clone(),
+            state: self.state.clone(),
+            out_stream: out_stream.clone(),
+        };
+
+        // We now know who the peer is and our latency to him.
+        {
+            let mut state = self.state.write().await;
+            match state.peer_trackers.get_mut(&peer_id) {
+                Some(tracker) => {
+                    if tracker.session.is_some() {
+                        return Err(Status::already_exists("peer already connected"));
+                    } else {
+                        tracker.session = Some(session.clone());
+                    }
+                }
+                None => {
+                    let latency = end.duration_since(start).unwrap();
+                    let peer_time = UNIX_EPOCH.add(Duration::from_millis(peer_pong.current_time));
+                    let peer_time_adj = peer_time.add(latency.div_f32(2.0)); // adjust for round trip latency
+                    let tracker = PeerTracker {
+                        clock_skew: ClockSkew::new(end, peer_time_adj),
+                        peer: Peer {
+                            peer_id: peer_hello.peer_id.clone(),
+                            urls: peer_hello.urls,
+                            latency: latency.as_millis() as u32,
+                        },
+                        session: Some(session.clone()),
+                    };
+                    println!("peer {} clock skew: {}", peer_id, &tracker.clock_skew);
+                    state.peer_trackers.insert(peer_id.clone(), tracker);
+                }
+            }
+        }
+        return Ok(session);
+    }
+}
+
 #[tonic::async_trait]
-impl limitador::service::replication::v1::replication_server::Replication for Server {
-    type StreamStream = Pin<Box<dyn Stream<Item = Result<Packet, Status>> + Send>>;
+impl Replication for Server {
+    type StreamStream = Pin<Box<dyn Stream<Item=Result<Packet, Status>> + Send>>;
 
     // Accepts a connection from a peer and starts a replication session
     async fn stream(
@@ -355,10 +269,10 @@ impl limitador::service::replication::v1::replication_server::Replication for Se
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(1);
 
-        let state = self.state.clone();
+        let server = self.clone();
         tokio::spawn(async move {
             let mut sender = MessageSender::Server(tx);
-            match handshake(state.clone(), &mut in_stream, &mut sender).await {
+            match server.handshake(&mut in_stream, &mut sender).await {
                 Ok(mut session) => {
                     match session.process(&mut in_stream).await {
                         Ok(_) => {
@@ -380,150 +294,4 @@ impl limitador::service::replication::v1::replication_server::Replication for Se
             Box::pin(ReceiverStream::new(rx)) as Self::StreamStream
         ))
     }
-}
-
-// Connect to a peer and start a replication session
-async fn connect_to_peer(
-    state: Arc<RwLock<ReplicationSharedState>>,
-    peer_url: String,
-) -> Result<(), Status> {
-    println!("connecting to peer '{}'", peer_url.clone());
-    let mut client = match ReplicationClient::connect(peer_url.clone()).await {
-        Ok(client) => client,
-        Err(err) => {
-            return Err(Status::new(Code::Unknown, err.to_string()));
-        }
-    };
-
-    let (tx, rx) = mpsc::channel(1);
-
-    let mut in_stream = client.stream(ReceiverStream::new(rx)).await?.into_inner();
-    let mut sender = MessageSender::Client(tx);
-    let mut session = handshake(state.clone(), &mut in_stream, &mut sender).await?;
-
-    tokio::spawn(async move {
-        match session.process(&mut in_stream).await {
-            Ok(_) => {
-                println!("client initiated stream ended");
-            }
-            Err(err) => {
-                println!("client initiated stream processing failed {:?}", err);
-            }
-        }
-        session.close().await;
-    });
-    Ok(())
-}
-
-// Reconnect failed peers periodically
-async fn reconnect_to_failed_peers(state: Arc<RwLock<ReplicationSharedState>>) -> () {
-    loop {
-        time::sleep(Duration::from_secs(1)).await;
-        let failed_peers: Vec<_> = {
-            let state = state.read().await;
-            state
-                .peer_trackers
-                .iter()
-                .filter_map(|(_, peer_tracker)| {
-                    if peer_tracker.session.is_none() {
-                        Some(peer_tracker.peer.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        for peer in failed_peers {
-            for url in peer.urls {
-                match connect_to_peer(state.clone(), url.clone()).await {
-                    Ok(_) => break,
-                    Err(err) => {
-                        println!("failed to connect with peer '{}': {:?}", url, err);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cmdline = Command::new("replication")
-        .version("0.1")
-        .about("Limitador replication server")
-        .arg(
-            Arg::new("address")
-                .long("address")
-                .default_value("[::1]:9001")
-                .help("The ip:port to listen on for replication"),
-        )
-        .arg(
-            Arg::new("peer-url")
-                .long("peer-url")
-                .action(ArgAction::Append)
-                .help("A replication peer url"),
-        )
-        .arg(Arg::new("id").long("id").help("A replication peer"));
-
-    let matches = cmdline.get_matches();
-
-    let addr = matches
-        .get_one::<String>("address")
-        .expect("`address` is required")
-        .as_str()
-        .to_socket_addrs()
-        .expect("invalid `address`")
-        .next()
-        .expect("invalid `address`")
-        .clone();
-
-    let peer_urls = matches.get_many::<String>("peer-url").clone();
-
-    let peer_id = match matches.get_one::<String>("id") {
-        Some(id) => id.as_bytes().to_vec(),
-        None => Uuid::new_v4().as_bytes().to_vec(),
-    };
-
-    let state = Arc::new(RwLock::new(ReplicationSharedState {
-        peer_id,
-        urls: vec![],
-        peer_trackers: HashMap::new(),
-    }));
-
-    // Create outbound connections to the configured peers
-    if let Some(peer_urls) = peer_urls {
-        peer_urls.into_iter().for_each(|peer_url| {
-            let state = state.clone();
-            let peer_url = peer_url.clone();
-            tokio::spawn(async move {
-                // Keep trying until we get once successful connection handshake.
-                loop {
-                    match connect_to_peer(state.clone(), peer_url.clone()).await {
-                        Ok(_) => break,
-                        Err(err) => {
-                            println!("failed to connect with peer '{}': {:?}", peer_url, err);
-                            time::sleep(Duration::from_secs(1)).await
-                        }
-                    }
-                }
-            });
-        })
-    }
-
-    // Periodically reconnect to failed peers
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            reconnect_to_failed_peers(state.clone()).await;
-        });
-    }
-
-    println!("listening on: id={}", addr);
-    tonic::transport::Server::builder()
-        .add_service(ReplicationServer::new(Server { state }))
-        .serve(addr)
-        .await?;
-
-    Ok(())
 }
