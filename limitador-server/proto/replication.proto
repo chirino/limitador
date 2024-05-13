@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package limitador.service.replication.v1;
+
+// A packet defines all the types of messages that can be sent between replication peers.
+message Packet {
+  oneof message {
+    // the Hello message is used to introduce a peer to another peer.  It is the first message sent by a peer.
+    Hello hello = 1;
+    // the MembershipUpdate message is used to gossip about the other peers in the cluster:
+    //  1) sent after the first Hello message
+    //  2) sent when the membership state changes
+    MembershipUpdate membership_update = 2;
+    // the SubscribeRequest message is used to start or stop updates from named peers.
+    SubscribeRequest subscribe_request = 3;
+    // the SubscribeRequest message is used to start or stop updates from named peers.
+    SubscribeResponse subscribe_response = 4;
+    // the CounterUpdate message is used to send counter updates.
+    CounterUpdate counter_update = 5;
+    // the Ping message is used to request a pong from the other peer.
+    Ping ping = 6;
+    // the Pong message is used to respond to a ping.
+    Pong pong = 7;
+  }
+}
+
+// this is the first packet sent by a peer to another peer.
+message Hello {
+  bytes peer_id = 1;
+  repeated string urls = 3; // url that can be used to connect to the peer.
+}
+
+// A request to a peer to respond with a Pong message.
+message Ping {}
+
+// Pong is the response to a Ping and Hello message.
+message Pong {
+  // the current time at of the peer  in milliseconds of UTC time since Unix epoch 1970-01-01T00:00:00Z.
+  uint64 current_time = 3;
+}
+
+message MembershipUpdate {
+  repeated Peer peers = 1;
+}
+
+message Peer {
+  bytes peer_id = 1;
+  uint32 latency = 2; // the round trip latency to the peer in milliseconds.
+  repeated string urls = 3; // url that can be used to connect to the peer.
+}
+
+message SubscribeRequest {
+  repeated bytes start_peer_ids = 1;
+  repeated bytes stop_peer_ids = 2;
+}
+
+message SubscribeResponse {
+  // all update messages after this message will contain values index in the order of the peers in this list.
+  repeated bytes peer_ids = 1;
+}
+
+message CounterUpdate {
+  string key = 1;
+  repeated int64 values = 2;
+  // When the counter will expire. in milliseconds of UTC time since Unix epoch 1970-01-01T00:00:00Z.
+  uint64 expires_at = 3;
+  // The time windows of the counter in milliseconds.
+  uint64 window = 4;
+}
+
+// Replication is the limitador replication service.
+service Replication {
+  rpc Stream(stream Packet) returns (stream Packet) {}
+}

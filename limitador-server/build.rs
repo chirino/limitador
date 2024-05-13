@@ -23,6 +23,9 @@ fn generate_protobuf() -> Result<(), Box<dyn Error>> {
                 "vendor/protobufs/xds",
             ],
         )?;
+
+    tonic_build::compile_protos("proto/replication.proto")?;
+
     Ok(())
 }
 

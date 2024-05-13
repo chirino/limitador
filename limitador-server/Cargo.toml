@@ -49,6 +49,14 @@ openssl = { version = "0.10.57", features = ["vendored"] }
 metrics = "0.22.3"
 metrics-exporter-prometheus = "0.14.0"
 
+tokio-stream = { version = "0.1" }
+h2 = { version = "0.3" }
+base64 = "0.22.1"
+uuid = { version =  "1.8.0", features = ["v4", "fast-rng"] }
 
 [build-dependencies]
 tonic-build = "0.11"
+
+[[bin]]
+name = "replication-server"
+path = "src/replication/server.rs"
