@@ -1,10 +1,15 @@
-use crate::limit::conditions::{ErrorType, Literal, SyntaxError, Token, TokenType};
-use serde::{Deserialize, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
+
+use serde::{Deserialize, Serialize, Serializer};
+
+#[cfg(feature = "lenient_conditions")]
+pub use deprecated::check_deprecated_syntax_usages_and_reset;
+
+use crate::limit::conditions::{ErrorType, Literal, SyntaxError, Token, TokenType};
 
 #[cfg(feature = "lenient_conditions")]
 mod deprecated {
@@ -24,9 +29,6 @@ mod deprecated {
         DEPRECATED_SYNTAX.fetch_or(true, Ordering::SeqCst);
     }
 }
-
-#[cfg(feature = "lenient_conditions")]
-pub use deprecated::check_deprecated_syntax_usages_and_reset;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Namespace(String);
@@ -51,6 +53,8 @@ impl From<String> for Namespace {
 
 #[derive(Eq, Debug, Clone, Serialize, Deserialize)]
 pub struct Limit {
+    #[serde(skip_serializing, default)]
+    id: Option<String>,
     namespace: Namespace,
     #[serde(skip_serializing, default)]
     max_value: u64,
@@ -307,6 +311,7 @@ where
 
 impl Limit {
     pub fn new<N: Into<Namespace>, T: TryInto<Condition>>(
+        id: Option<String>,
         namespace: N,
         max_value: u64,
         seconds: u64,
@@ -319,6 +324,7 @@ impl Limit {
     {
         // the above where-clause is needed in order to call unwrap().
         Self {
+            id,
             namespace: namespace.into(),
             max_value,
             seconds,
@@ -333,6 +339,10 @@ impl Limit {
 
     pub fn namespace(&self) -> &Namespace {
         &self.namespace
+    }
+
+    pub fn id(&self) -> &Option<String> {
+        &self.id
     }
 
     pub fn max_value(&self) -> u64 {
@@ -821,7 +831,14 @@ mod tests {
 
     #[test]
     fn limit_can_have_an_optional_name() {
-        let mut limit = Limit::new("test_namespace", 10, 60, vec!["x == \"5\""], vec!["y"]);
+        let mut limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == \"5\""],
+            vec!["y"],
+        );
         assert!(limit.name.is_none());
 
         let name = "Test Limit";
@@ -831,7 +848,14 @@ mod tests {
 
     #[test]
     fn limit_applies() {
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == \"5\""], vec!["y"]);
+        let limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == \"5\""],
+            vec!["y"],
+        );
 
         let mut values: HashMap<String, String> = HashMap::new();
         values.insert("x".into(), "5".into());
@@ -842,7 +866,14 @@ mod tests {
 
     #[test]
     fn limit_does_not_apply_when_cond_is_false() {
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == \"5\""], vec!["y"]);
+        let limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == \"5\""],
+            vec!["y"],
+        );
 
         let mut values: HashMap<String, String> = HashMap::new();
         values.insert("x".into(), "1".into());
@@ -854,7 +885,7 @@ mod tests {
     #[test]
     #[cfg(feature = "lenient_conditions")]
     fn limit_does_not_apply_when_cond_is_false_deprecated_style() {
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == 5"], vec!["y"]);
+        let limit = Limit::new(None, "test_namespace", 10, 60, vec!["x == 5"], vec!["y"]);
 
         let mut values: HashMap<String, String> = HashMap::new();
         values.insert("x".into(), "1".into());
@@ -864,7 +895,14 @@ mod tests {
         assert!(check_deprecated_syntax_usages_and_reset());
         assert!(!check_deprecated_syntax_usages_and_reset());
 
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == foobar"], vec!["y"]);
+        let limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == foobar"],
+            vec!["y"],
+        );
 
         let mut values: HashMap<String, String> = HashMap::new();
         values.insert("x".into(), "foobar".into());
@@ -877,7 +915,14 @@ mod tests {
 
     #[test]
     fn limit_does_not_apply_when_cond_var_is_not_set() {
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == \"5\""], vec!["y"]);
+        let limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == \"5\""],
+            vec!["y"],
+        );
 
         // Notice that "x" is not set
         let mut values: HashMap<String, String> = HashMap::new();
@@ -889,7 +934,14 @@ mod tests {
 
     #[test]
     fn limit_does_not_apply_when_var_not_set() {
-        let limit = Limit::new("test_namespace", 10, 60, vec!["x == \"5\""], vec!["y"]);
+        let limit = Limit::new(
+            None,
+            "test_namespace",
+            10,
+            60,
+            vec!["x == \"5\""],
+            vec!["y"],
+        );
 
         // Notice that "y" is not set
         let mut values: HashMap<String, String> = HashMap::new();
@@ -901,6 +953,7 @@ mod tests {
     #[test]
     fn limit_applies_when_all_its_conditions_apply() {
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -919,6 +972,7 @@ mod tests {
     #[test]
     fn limit_does_not_apply_if_one_cond_doesnt() {
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -997,5 +1051,19 @@ mod tests {
         };
         let result = serde_json::to_string(&condition).expect("Should serialize");
         assert_eq!(result, r#""foobar == \"ok\"""#.to_string());
+    }
+
+    #[test]
+    fn limit_id() {
+        let limit = Limit::new(
+            Some("test_id".to_string()),
+            "test_namespace",
+            10,
+            60,
+            vec!["req.method == 'GET'"],
+            vec!["app_id"],
+        );
+
+        assert_eq!(limit.id().clone(), Some("test_id".to_string()))
     }
 }

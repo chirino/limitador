@@ -677,6 +677,7 @@ mod tests {
         }
         Counter::new(
             Limit::new(
+                None,
                 "test_namespace",
                 max_val,
                 60,

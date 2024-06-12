@@ -15,6 +15,7 @@ pub struct Counter {
     set_variables: HashMap<String, String>,
 
     remaining: Option<u64>,
+
     expires_in: Option<Duration>,
 }
 
@@ -70,6 +71,10 @@ impl Counter {
 
     pub fn window(&self) -> Duration {
         Duration::from_secs(self.limit.seconds())
+    }
+
+    pub fn id(&self) -> &Option<String> {
+        self.limit.id()
     }
 
     pub fn namespace(&self) -> &Namespace {

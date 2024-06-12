@@ -548,6 +548,7 @@ fn generate_test_limits(scenario: &TestScenario) -> (Vec<Limit>, Vec<TestCallPar
 
         for limit_idx in 0..scenario.n_limits_per_ns {
             test_limits.push(Limit::new(
+                None,
                 namespace.clone(),
                 u64::MAX,
                 ((limit_idx * 60) + 10) as u64,

@@ -1,13 +1,15 @@
-use crate::counter::Counter;
-use crate::limit::{Limit, Namespace};
-use crate::storage::atomic_expiring_value::AtomicExpiringValue;
-use crate::storage::{Authorization, CounterStorage, StorageErr};
-use moka::sync::Cache;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
+
+use moka::sync::Cache;
+
+use crate::counter::Counter;
+use crate::limit::{Limit, Namespace};
+use crate::storage::atomic_expiring_value::AtomicExpiringValue;
+use crate::storage::{Authorization, CounterStorage, StorageErr};
 
 type NamespacedLimitCounters<T> = HashMap<Namespace, HashMap<Limit, T>>;
 
@@ -288,8 +290,16 @@ mod tests {
     fn counters_for_multiple_limit_per_ns() {
         let storage = InMemoryStorage::default();
         let namespace = "test_namespace";
-        let limit_1 = Limit::new(namespace, 1, 1, vec!["req.method == 'GET'"], vec!["app_id"]);
+        let limit_1 = Limit::new(
+            None,
+            namespace,
+            1,
+            1,
+            vec!["req.method == 'GET'"],
+            vec!["app_id"],
+        );
         let limit_2 = Limit::new(
+            None,
             namespace,
             1,
             10,

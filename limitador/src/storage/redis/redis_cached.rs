@@ -437,6 +437,7 @@ mod tests {
         let mut counters_and_deltas = HashMap::new();
         let counter = Counter::new(
             Limit::new(
+                None,
                 "test_namespace",
                 10,
                 60,
@@ -499,6 +500,7 @@ mod tests {
     async fn flush_batcher_and_update_counters_test() {
         let counter = Counter::new(
             Limit::new(
+                None,
                 "test_namespace",
                 10,
                 60,
@@ -558,6 +560,7 @@ mod tests {
     async fn flush_batcher_reverts_on_err() {
         let counter = Counter::new(
             Limit::new(
+                None,
                 "test_namespace",
                 10,
                 60,

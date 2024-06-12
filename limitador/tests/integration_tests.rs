@@ -216,6 +216,7 @@ mod test {
     async fn get_namespaces(rate_limiter: &mut TestsLimiter) {
         let limits = vec![
             Limit::new(
+                None,
                 "first_namespace",
                 10,
                 60,
@@ -223,6 +224,7 @@ mod test {
                 vec!["app_id"],
             ),
             Limit::new(
+                None,
                 "second_namespace",
                 20,
                 60,
@@ -248,6 +250,7 @@ mod test {
         rate_limiter: &mut TestsLimiter,
     ) {
         let lim1 = Limit::new(
+            None,
             "first_namespace",
             10,
             60,
@@ -256,6 +259,7 @@ mod test {
         );
 
         let lim2 = Limit::new(
+            None,
             "second_namespace",
             20,
             60,
@@ -280,6 +284,7 @@ mod test {
 
     async fn add_a_limit(rate_limiter: &mut TestsLimiter) {
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -300,6 +305,7 @@ mod test {
 
     async fn add_limit_without_vars(rate_limiter: &mut TestsLimiter) {
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -322,6 +328,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit_1 = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -330,6 +337,7 @@ mod test {
         );
 
         let limit_2 = Limit::new(
+            None,
             namespace,
             5,
             60,
@@ -349,6 +357,7 @@ mod test {
 
     async fn delete_limit(rate_limiter: &mut TestsLimiter) {
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -366,6 +375,7 @@ mod test {
     async fn delete_limit_also_deletes_associated_counters(rate_limiter: &mut TestsLimiter) {
         let namespace = "test_namespace";
         let limit = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -401,6 +411,7 @@ mod test {
 
         let limits = [
             Limit::new(
+                None,
                 namespace,
                 10,
                 60,
@@ -408,6 +419,7 @@ mod test {
                 vec!["app_id"],
             ),
             Limit::new(
+                None,
                 namespace,
                 5,
                 60,
@@ -433,6 +445,7 @@ mod test {
 
         rate_limiter
             .add_limit(&Limit::new(
+                None,
                 namespace1,
                 10,
                 60,
@@ -441,7 +454,14 @@ mod test {
             ))
             .await;
         rate_limiter
-            .add_limit(&Limit::new(namespace2, 5, 60, vec!["x == '10'"], vec!["z"]))
+            .add_limit(&Limit::new(
+                None,
+                namespace2,
+                5,
+                60,
+                vec!["x == '10'"],
+                vec!["z"],
+            ))
             .await;
 
         rate_limiter.delete_limits(namespace1).await.unwrap();
@@ -453,6 +473,7 @@ mod test {
     async fn delete_limits_of_a_namespace_also_deletes_counters(rate_limiter: &mut TestsLimiter) {
         let namespace = "test_namespace";
         let limit = Limit::new(
+            None,
             namespace,
             5,
             60,
@@ -487,6 +508,7 @@ mod test {
         let namespace = "test_namespace";
         let max_hits = 3;
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,
@@ -524,6 +546,7 @@ mod test {
         let max_hits = 3;
         let limits = vec![
             Limit::new(
+                None,
                 namespace,
                 max_hits,
                 60,
@@ -531,6 +554,7 @@ mod test {
                 vec!["app_id"],
             ),
             Limit::new(
+                None,
                 namespace,
                 max_hits + 1,
                 60,
@@ -592,6 +616,7 @@ mod test {
     async fn rate_limited_with_delta_higher_than_one(rate_limiter: &mut TestsLimiter) {
         let namespace = "test_namespace";
         let limit = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -627,6 +652,7 @@ mod test {
         let max = 10;
         let namespace = "test_namespace";
         let limit = Limit::new(
+            None,
             namespace,
             max,
             60,
@@ -650,6 +676,7 @@ mod test {
         let namespace = "test_namespace";
         let max_hits = 3;
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,
@@ -704,6 +731,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit = Limit::new(
+            None,
             namespace,
             0, // So reporting 1 more would not be allowed
             60,
@@ -728,6 +756,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit = Limit::new(
+            None,
             namespace,
             0, // So reporting 1 more would not be allowed
             60,
@@ -751,6 +780,7 @@ mod test {
         let max_hits = 3;
 
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,
@@ -788,6 +818,7 @@ mod test {
         let max_hits = 3;
 
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,
@@ -838,6 +869,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -867,6 +899,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit = Limit::new(
+            None,
             namespace,
             0, // So reporting 1 more would not be allowed
             60,
@@ -895,6 +928,7 @@ mod test {
         let hits_app_2 = 5;
 
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,
@@ -952,6 +986,7 @@ mod test {
         // There's a limit, but no counters. The result should be empty.
 
         let limit = Limit::new(
+            None,
             "test_namespace",
             10,
             60,
@@ -973,6 +1008,7 @@ mod test {
         let limit_time = 1;
 
         let limit = Limit::new(
+            None,
             namespace,
             10,
             limit_time,
@@ -998,6 +1034,7 @@ mod test {
 
     async fn configure_with_creates_the_given_limits(rate_limiter: &mut TestsLimiter) {
         let first_limit = Limit::new(
+            None,
             "first_namespace",
             10,
             60,
@@ -1006,6 +1043,7 @@ mod test {
         );
 
         let second_limit = Limit::new(
+            None,
             "second_namespace",
             20,
             60,
@@ -1037,6 +1075,7 @@ mod test {
         let hits_to_report = 1;
 
         let limit = Limit::new(
+            None,
             namespace,
             max_value,
             60,
@@ -1076,6 +1115,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit_to_be_kept = Limit::new(
+            None,
             namespace,
             10,
             1,
@@ -1084,6 +1124,7 @@ mod test {
         );
 
         let limit_to_be_deleted = Limit::new(
+            None,
             namespace,
             20,
             60,
@@ -1110,6 +1151,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit_orig = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -1118,6 +1160,7 @@ mod test {
         );
 
         let limit_update = Limit::new(
+            None,
             namespace,
             20,
             60,
@@ -1142,6 +1185,7 @@ mod test {
         let namespace = "test_namespace";
 
         let limit_1 = Limit::new(
+            None,
             namespace,
             10,
             60,
@@ -1150,6 +1194,7 @@ mod test {
         );
 
         let limit_2 = Limit::new(
+            None,
             namespace,
             20,
             60,
@@ -1158,6 +1203,7 @@ mod test {
         );
 
         let mut limit_3 = Limit::new(
+            None,
             namespace,
             20,
             60,
@@ -1187,6 +1233,7 @@ mod test {
         let namespace = "test_namespace";
         let max_hits = 3;
         let limit = Limit::new(
+            None,
             namespace,
             max_hits,
             60,

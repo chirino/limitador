@@ -550,6 +550,7 @@ mod tests {
     async fn create_test_limit(limiter: &Limiter, namespace: &str, max: u64) -> LimitadorLimit {
         // Create a limit
         let limit = LimitadorLimit::new(
+            None,
             namespace,
             max,
             60,

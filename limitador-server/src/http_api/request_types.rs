@@ -18,6 +18,7 @@ pub struct CheckAndReportInfo {
 
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Apiv2Schema)]
 pub struct Limit {
+    id: Option<String>,
     namespace: String,
     max_value: u64,
     seconds: u64,
@@ -29,6 +30,7 @@ pub struct Limit {
 impl From<&LimitadorLimit> for Limit {
     fn from(ll: &LimitadorLimit) -> Self {
         Self {
+            id: ll.id().clone(),
             namespace: ll.namespace().as_ref().to_string(),
             max_value: ll.max_value(),
             seconds: ll.seconds(),
@@ -42,6 +44,7 @@ impl From<&LimitadorLimit> for Limit {
 impl From<Limit> for LimitadorLimit {
     fn from(limit: Limit) -> Self {
         let mut limitador_limit = Self::new(
+            limit.id,
             limit.namespace,
             limit.max_value,
             limit.seconds,

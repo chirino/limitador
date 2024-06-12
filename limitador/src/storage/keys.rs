@@ -12,9 +12,10 @@
 // reusing this module for other storage implementations make sure that using
 // "{}" for sharding applies.
 
+use std::sync::Arc;
+
 use crate::counter::Counter;
 use crate::limit::Limit;
-use std::sync::Arc;
 
 pub fn key_for_counter(counter: &Counter) -> String {
     if counter.remaining().is_some() || counter.expires_in().is_some() {
@@ -81,18 +82,21 @@ pub fn partial_counter_from_counter_key(key: &str) -> Counter {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use crate::counter::Counter;
+    use crate::Limit;
+
     use super::{
         key_for_counter, key_for_counters_of_limit, partial_counter_from_counter_key,
         prefix_for_namespace,
     };
-    use crate::counter::Counter;
-    use crate::Limit;
-    use std::collections::HashMap;
-    use std::time::Duration;
 
     #[test]
     fn key_for_limit_format() {
         let limit = Limit::new(
+            None,
             "example.com",
             10,
             60,
@@ -107,7 +111,14 @@ mod tests {
     #[test]
     fn counter_key_and_counter_are_symmetric() {
         let namespace = "ns_counter:";
-        let limit = Limit::new(namespace, 1, 1, vec!["req.method == 'GET'"], vec!["app_id"]);
+        let limit = Limit::new(
+            None,
+            namespace,
+            1,
+            1,
+            vec!["req.method == 'GET'"],
+            vec!["app_id"],
+        );
         let counter = Counter::new(limit.clone(), HashMap::default());
         let raw = key_for_counter(&counter);
         assert_eq!(counter, partial_counter_from_counter_key(&raw));
@@ -118,7 +129,14 @@ mod tests {
     #[test]
     fn counter_key_does_not_include_transient_state() {
         let namespace = "ns_counter:";
-        let limit = Limit::new(namespace, 1, 1, vec!["req.method == 'GET'"], vec!["app_id"]);
+        let limit = Limit::new(
+            None,
+            namespace,
+            1,
+            1,
+            vec!["req.method == 'GET'"],
+            vec!["app_id"],
+        );
         let counter = Counter::new(limit.clone(), HashMap::default());
         let mut other = counter.clone();
         other.set_remaining(123);
@@ -129,11 +147,27 @@ mod tests {
 
 #[cfg(feature = "disk_storage")]
 pub mod bin {
-    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
+
+    use serde::{Deserialize, Serialize};
 
     use crate::counter::Counter;
     use crate::limit::Limit;
+
+    #[derive(PartialEq, Debug, Serialize, Deserialize)]
+    struct IdCounterKey<'a> {
+        id: &'a str,
+        variables: Vec<(&'a str, &'a str)>,
+    }
+
+    impl<'a> From<&'a Counter> for IdCounterKey<'a> {
+        fn from(counter: &'a Counter) -> Self {
+            IdCounterKey {
+                id: counter.id().as_ref().unwrap().as_ref(),
+                variables: counter.variables_for_key(),
+            }
+        }
+    }
 
     #[derive(PartialEq, Debug, Serialize, Deserialize)]
     struct CounterKey<'a> {
@@ -187,6 +221,20 @@ pub mod bin {
         }
     }
 
+    pub fn key_for_counter_v2(counter: &Counter) -> Vec<u8> {
+        let mut encoded_key = Vec::new();
+        if counter.id().is_some() {
+            let key: IdCounterKey = counter.into();
+            encoded_key = postcard::to_extend(&1u8, encoded_key).unwrap();
+            encoded_key = postcard::to_extend(&key, encoded_key).unwrap();
+        } else {
+            let key: CounterKey = counter.into();
+            encoded_key = postcard::to_extend(&2u8, encoded_key).unwrap();
+            encoded_key = postcard::to_extend(&key, encoded_key).unwrap()
+        }
+        encoded_key
+    }
+
     pub fn key_for_counter(counter: &Counter) -> Vec<u8> {
         let key: CounterKey = counter.into();
         postcard::to_stdvec(&key).unwrap()
@@ -209,23 +257,27 @@ pub mod bin {
             .into_iter()
             .map(|(var, value)| (var.to_string(), value.to_string()))
             .collect();
-        let limit = Limit::new(ns, u64::default(), seconds, conditions, map.keys());
+        let limit = Limit::new(None, ns, u64::default(), seconds, conditions, map.keys());
         Counter::new(limit, map)
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{
-            key_for_counter, partial_counter_from_counter_key, prefix_for_namespace, CounterKey,
-        };
+        use std::collections::HashMap;
+
         use crate::counter::Counter;
         use crate::Limit;
-        use std::collections::HashMap;
+
+        use super::{
+            key_for_counter, key_for_counter_v2, partial_counter_from_counter_key,
+            prefix_for_namespace, CounterKey,
+        };
 
         #[test]
         fn counter_key_serializes_and_back() {
             let namespace = "ns_counter:";
             let limit = Limit::new(
+                None,
                 namespace,
                 1,
                 2,
@@ -248,7 +300,14 @@ pub mod bin {
         #[test]
         fn counter_key_and_counter_are_symmetric() {
             let namespace = "ns_counter:";
-            let limit = Limit::new(namespace, 1, 1, vec!["req.method == 'GET'"], vec!["app_id"]);
+            let limit = Limit::new(
+                None,
+                namespace,
+                1,
+                1,
+                vec!["req.method == 'GET'"],
+                vec!["app_id"],
+            );
             let mut variables = HashMap::default();
             variables.insert("app_id".to_string(), "123".to_string());
             let counter = Counter::new(limit.clone(), variables);
@@ -259,12 +318,59 @@ pub mod bin {
         #[test]
         fn counter_key_starts_with_namespace_prefix() {
             let namespace = "ns_counter:";
-            let limit = Limit::new(namespace, 1, 1, vec!["req.method == 'GET'"], vec!["app_id"]);
+            let limit = Limit::new(
+                None,
+                namespace,
+                1,
+                1,
+                vec!["req.method == 'GET'"],
+                vec!["app_id"],
+            );
             let counter = Counter::new(limit, HashMap::default());
             let serialized_counter = key_for_counter(&counter);
 
             let prefix = prefix_for_namespace(namespace);
             assert_eq!(&serialized_counter[..prefix.len()], &prefix);
+        }
+
+        #[test]
+        fn counters_with_id() {
+            let namespace = "ns_counter:";
+            let limit_without_id = Limit::new(
+                None,
+                namespace,
+                1,
+                1,
+                vec!["req.method == 'GET'"],
+                vec!["app_id"],
+            );
+            let limit_with_id = Limit::new(
+                Some("id200".to_string()),
+                namespace,
+                1,
+                1,
+                vec!["req.method == 'GET'"],
+                vec!["app_id"],
+            );
+
+            let counter_with_id = Counter::new(limit_with_id, HashMap::default());
+            let serialized_with_id_counter = key_for_counter(&counter_with_id);
+
+            let counter_without_id = Counter::new(limit_without_id, HashMap::default());
+            let serialized_without_id_counter = key_for_counter(&counter_without_id);
+
+            // the original key_for_counter continues to encode kinda big
+            assert_eq!(serialized_without_id_counter.len(), 35);
+            assert_eq!(serialized_with_id_counter.len(), 35);
+
+            // serialized_counter_v2 will only encode the id.... so it will be smaller for
+            // counters with an id.
+            let serialized_counter_with_id_v2 = key_for_counter_v2(&counter_with_id);
+            assert_eq!(serialized_counter_with_id_v2.clone().len(), 8);
+
+            // but continues to be large for counters without an id.
+            let serialized_counter_without_id_v2 = key_for_counter_v2(&counter_without_id);
+            assert_eq!(serialized_counter_without_id_v2.clone().len(), 36);
         }
     }
 }

@@ -51,6 +51,7 @@
 //! ```
 //! use limitador::limit::Limit;
 //! let limit = Limit::new(
+//!      None,
 //!     "my_namespace",
 //!      10,
 //!      60,
@@ -68,6 +69,7 @@
 //! use limitador::RateLimiter;
 //! use limitador::limit::Limit;
 //! let limit = Limit::new(
+//!      None,
 //!     "my_namespace",
 //!      10,
 //!      60,
@@ -100,6 +102,7 @@
 //! let mut rate_limiter = RateLimiter::new(1000);
 //!
 //! let limit = Limit::new(
+//!      None,
 //!     "my_namespace",
 //!      2,
 //!      60,
@@ -164,6 +167,7 @@
 //! use limitador::limit::Limit;
 //! use limitador::storage::redis::AsyncRedisStorage;
 //! let limit = Limit::new(
+//!      None,
 //!      "my_namespace",
 //!      10,
 //!      60,
